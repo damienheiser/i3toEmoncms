@@ -2,7 +2,7 @@
 Gathers data from B M W Connected Drive for B M W i3 reported details and post to emoncms
 
 ## Assumptions
-This is a **hobby project**, for my own proof of concept that I could do this.  Other projects on git hub take advantage of the API directly, but the iOS apps are locked in such a way that I cannot intercept the communications.  Therefore, I decided to use the Connected Drive website and pull all of the data directly from it.  There are probably many things that will break this in the future.
+This is a **hobby project created for educational use**, for my own proof of concept that I could do this.  Other projects on git hub take advantage of the API directly, but the iOS apps are locked in such a way that I cannot intercept the communications.  Therefore, I decided to use the Connected Drive website and pull all of the data directly from it.  There are probably many things that will break this in the future.
 
 ## Theory of Operation
 	- Obtains JS Session Cookie
@@ -65,7 +65,7 @@ ok
 
 
 ## Proposed Use
-I have this running as a cron job every 5 minutes, the resolution seems to be at least that high for getting battery charge state during active charging.
+Run as a cron job every 5 minutes, the resolution seems to be at least that high for getting battery charge state during active charging.
 
 ## API Sommelier
 This pairs really well with an IFTTT integration using the B M W Labs IFTTT Connected Drive widget.  Allowing you to retrieve overall Mileage, parking and driving events (going over a certain speed, leaving/entering a geofence, reduction of travel range, changing to park or drive).
