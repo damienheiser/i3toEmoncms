@@ -1,10 +1,18 @@
 var cheerio = require('cheerio')
 var request = require('request')
 request = request.defaults ({jar: true})
-var cookies = require('request-cookies')
+var util = require('util')
+var levelup = require('levelup')
+var leveldown = require('leveldown')
+var db = levelup(leveldown('./i3ConnectedDriveEmonCMSDB'))
 
 // run from the command line 'node i3toEmoncms.js'
 /// EDIT THINGS BELOW THIS!!!
+
+// Set both of these to true to run this script and always put the data into emoncms
+// Set both of these to false to run this script and only place new events into emoncms
+var updateEmonCmsNoChange = false // true will always update EmonCMS, even if no data changes.
+var updateEmonCmsIfDriving = false // true will update EmonCMS when driving, corrects for undefined and zero values
 
 var loginObject = {
 	username: 'user%40domain.com', //Replace @ with %40 (ie. user%40domain.com)
@@ -36,7 +44,7 @@ var output = {
 	rexStatusMilesRemain: 0
 }
 
-// get cookie which is required for login
+
 function getCookieString (callback) {
 	console.log ('getting some delicious cookies...')
 	var url = 'https://connecteddrive.bmwusa.com/cdp/release/internet/servlet/login?locale=en-us'
@@ -57,7 +65,6 @@ function getCookieString (callback) {
 	})
 }
 
-// login to connected drive
 function doLogin (callback) {
 	getCookieString (function (error, cookieString) { 
 		console.log ('attempting to login...')
@@ -92,7 +99,7 @@ function doLogin (callback) {
 	})
 }
 
-// get statistics body from connected drive
+
 function getStatistics (callback) {
 	doLogin (function (error, status) {
 		console.log ('retrieving statistics')
@@ -110,11 +117,10 @@ function getStatistics (callback) {
 	})
 }
 
-// emoncms posting code
 function postToEmonCMS (passValues, callback) {
 	console.log ('posting to emoncms!')
 	var stringValues = JSON.stringify (passValues)
-	console.log (passValues)
+	console.log (util.inspect(passValues))
 
 	var postemoncms = {
 		method: 'POST',
@@ -122,61 +128,126 @@ function postToEmonCMS (passValues, callback) {
 	}
 	request (postemoncms, function (error, response, body) {
 		if (error) {console.log ('Error' + error); self.close(process.exit (-1))}
-
+		
+		console.log (util.inspect(body))
 		callback (null, body)
-	})	    
-}
-
-
-
-// function to process statistics
-function processStatistics (callback) {
-	getStatistics (function (error, $) {
-		if (error) {console.log (error); process.exit(-1)}
-		console.log ('parsing data from nasty ass html...')
-		output.lastTrip = lastTrip ($)
-		output.lastTripEfficiency = lastTripEfficiency ($)
-		
-		output.electricMileage = electricMileage ($)
-		output.electricMileageCommunityMax = electricMileageCommunityMax ($)
-		output.electricMileageCommunityAverage = electricMileageCommunityAverage ($)
-		
-		output.electricDistanceDrivenSinceLastCharged = electricDistanceDrivenSinceLastCharged ($)
-		output.electricDistanceDrivenSinceLastChargedMax = electricDistanceDrivenSinceLastChargedMax ($)
-		output.electricDistanceDrivenSinceLastChargedCommunityMax = electricDistanceDrivenSinceLastChargedCommunityMax ($)
-		output.electricDistanceDrivenSinceLastChargedCommunityAverage = electricDistanceDrivenSinceLastChargedCommunityAverage ($)
-		
-		output.consumptionmikWhTrip = consumptionmikWhTrip ($)
-		output.consumptionmikWhTotalAverage = consumptionmikWhTotalAverage ($)
-		output.consumptionmikWhCommunityAverage = consumptionmikWhCommunityAverage ($)
-		
-		output.recuperationmikWhTrip = recuperationmikWhTrip ($)
-		output.recuperationmikwhTotalAverage = recuperationmikwhTotalAverage ($)
-		output.recuperationmikwhCommunityAverage = recuperationmikwhCommunityAverage ($)
-		
-		output.batteryChargeStatusPercentage = batteryChargeStatusPercentage ($)
-		output.batteryChargeStatusMilesRemain = batteryChargeStatusMilesRemain ($)
-		
-		output.rexStatusPercentage = rexStatusPercentage ($)
-		output.rexStatusMilesRemain = rexStatusMilesRemain ($)
-
-		postToEmonCMS (output, function (error, body) {
-			if (error) {console.log (error); process.exit(-1)}
-			else callback (null, body)
-		})
-
-
 	})
 }
 
-// Process the statistics (run this program)
+
+
+
+function processStatistics (callback) {
+	var lastMileage
+	var lastTrip
+	db.get ('lastMileage', function (error, value) {if (error) {callback(error,null)} else {lastMileage = value}})
+	db.get ('lastTrip', function (error, value) {if (error) {callback(error,null)} else {lastTrip = value}})
+	getStatistics (function (error, $) {
+		if (error) {console.log (error); process.exit(-1)}
+		console.log ('parsing data from nasty ass html...')
+		if (performUpdate ($) == true || updateEmonCmsNoChange == true) {
+
+			// If the battery charger status percentage is not being rendered, the car is driving, no data is being updated, so don't send an update
+			output.batteryChargeStatusPercentage = batteryChargeStatusPercentage ($)
+			if (output.batteryChargeStatusPercentage == '' && updateEmonCmsIfDriving == false) {
+				console.log ('batteryChargeStatusPercentage ' + output.batteryChargeStatusPercentage)
+				console.log ('Driving... not updating...')
+				process.exit(0)
+			} else if (output.batteryChargeStatusPercentage == '' && updateEmonCmsDriving == true) {
+				delete output.batteryChargeStatusPercentage
+				delete output.batteryChargeStatusMilesRemain
+			
+				delete output.rexStatusPercentage
+				delete output.rexStatusMilesRemain
+			} else {
+				output.batteryChargeStatusMilesRemain = batteryChargeStatusMilesRemain ($)
+			
+				output.rexStatusPercentage = rexStatusPercentage ($)
+				output.rexStatusMilesRemain = rexStatusMilesRemain ($)
+			}
+			
+			// If there hasn't been any driving since the last update (i.e. battery is charging), don't update the trip based mileage information
+			// Also accounts for no additional electric mileage, but gasoline mileage through Last Trip increasing.
+			if ((electricMileage ($) == lastMileage && lastTripMileage($) == lastTrip) && updateEmonCmsNoChange == false ) 
+			{
+				delete output.lastTrip
+				delete output.lastTripEfficiency
+				delete output.electricDistanceDrivenSinceLastCharged
+				delete output.consumptionmikWhTrip
+				delete output.recuperationmikWhTrip
+			} else {
+				output.lastTrip = lastTripMileage ($)
+				output.lastTripEfficiency = lastTripEfficiency ($)
+				output.electricDistanceDrivenSinceLastCharged = electricDistanceDrivenSinceLastCharged ($)
+				output.consumptionmikWhTrip = consumptionmikWhTrip ($)
+				output.recuperationmikWhTrip = recuperationmikWhTrip ($)
+			}
+
+			//Always output the mileage if there's been an update.
+			output.electricMileage = electricMileage ($)
+			
+			output.electricMileageCommunityMax = electricMileageCommunityMax ($)
+			output.electricMileageCommunityAverage = electricMileageCommunityAverage ($)
+			
+			output.electricDistanceDrivenSinceLastChargedMax = electricDistanceDrivenSinceLastChargedMax ($)
+			output.electricDistanceDrivenSinceLastChargedCommunityMax = electricDistanceDrivenSinceLastChargedCommunityMax ($)
+			output.electricDistanceDrivenSinceLastChargedCommunityAverage = electricDistanceDrivenSinceLastChargedCommunityAverage ($)
+			
+			output.consumptionmikWhTotalAverage = consumptionmikWhTotalAverage ($)
+			output.consumptionmikWhCommunityAverage = consumptionmikWhCommunityAverage ($)
+			
+			output.recuperationmikwhTotalAverage = recuperationmikwhTotalAverage ($)
+			output.recuperationmikwhCommunityAverage = recuperationmikwhCommunityAverage ($)
+			
+			
+			postToEmonCMS (output, function (error, body) {
+				if (error) {console.log (error); process.exit(-1)}
+				db.put ('lastUpdated', getCurrentLastUpdated($))
+				db.put ('lastOutput', JSON.stringify(output))
+				if (lastTripMileage($) != lastTrip) {
+					db.put ('lastTrip', output.lastTrip)
+				} 
+				if (electricMileage($) != lastMileage)  {
+					db.put ('lastMileage', output.electricMileage)
+				}
+				
+				db.put ('lastMileage', output.electricMileage)
+				console.log ('Writing to db... waiting for promises to be returned.')
+				setTimeout (callback (null, body), 5000)
+			})
+		} else {
+			console.log ('Current Update and Last Update match... not updating')
+			process.exit(0)
+		}
+	})
+}
+
+// Process statistics (run program)
 processStatistics (function (error, body) {
 	if (error) {console.log (error); process.exit(-1)}
 	else {console.log (body), process.exit()}
 })
 
-// last trip mileage
-function lastTrip ($) {
+// Get the last time the page was updated
+function getCurrentLastUpdated ($) {
+	return $('div #teaserVehicleStatus p:nth-child(2)').text().substring(0, $('div #teaserVehicleStatus p:nth-child(2)').text().indexOf('\n'))
+}
+
+// Should an update be performed based on the the last updated date and the current updated date
+function performUpdate ($) {
+	var currentLastUpdated = getCurrentLastUpdated($)
+	db.get ('lastUpdated', function (error, lastUpdated) {
+		console.log ('last: ' + lastUpdated + ' | now: ' + currentLastUpdated)
+		if (lastUpdated == currentLastUpdated) {
+			return false
+		} else {
+			return true
+		}
+	})
+}
+
+// Get last trip mileage
+function lastTripMileage ($) {
 	//"Last trip 2.5 mlsAll trips"
 	var i3LastTrip = $('div .statprofile h3').text()
 	var i3LastTripLength = i3LastTrip.length
@@ -185,7 +256,7 @@ function lastTrip ($) {
 	return i3LastTrip.substring (i3LastTripPlocation+2, i3LastTripmlsLocation)
 }
 
-// last trip reported efficiency
+// Get last trip efficiency rating
 function lastTripEfficiency ($, callback) {
 	return  $('div #heros span').text().substring(0,2)
 }
@@ -344,5 +415,4 @@ function rexStatusMilesRemain ($) {
 	var i3RangesPercentLocation = i3Ranges.indexOf('%')
 	var i3RangesMls1Location = i3Ranges.indexOf('mls')
 	return i3Ranges.substring(i3RangesMls1Location+3, i3RangesLength-4)
-
 }
