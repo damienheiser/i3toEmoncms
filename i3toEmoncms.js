@@ -4,7 +4,7 @@ request = request.defaults ({jar: true})
 var util = require('util')
 var levelup = require('levelup')
 var leveldown = require('leveldown')
-var db = levelup(leveldown('./i3ConnectedDriveEmonCMSDB'))
+var db = levelup(leveldown('./i3ToEmonCMSDB'))
 
 // run from the command line 'node i3toEmoncms.js'
 /// EDIT THINGS BELOW THIS!!!
@@ -12,16 +12,16 @@ var db = levelup(leveldown('./i3ConnectedDriveEmonCMSDB'))
 // Set both of these to true to run this script and always put the data into emoncms
 // Set both of these to false to run this script and only place new events into emoncms
 var updateEmonCmsNoChange = false // true will always update EmonCMS, even if no data changes.
-var updateEmonCmsIfDriving = false // true will update EmonCMS when driving, corrects for undefined and zero values
+var updateEmonCmsIfDriving = false // true will update EmonCMS when driving.
+
 
 var loginObject = {
 	username: 'user%40domain.com', //Replace @ with %40 (ie. user%40domain.com)
 	password: 'YOURPASSWORD', // your password
 	emonCmsURL: 'https://www.emoncms.org/', //emoncms post url
+	emonCmsNode: 'BMWi3REx', // change this for your own specific node
 	emonCmsAPIKey : '' // your emoncms.org write key
 }
-
-/// DON'T EDIT ANYTHING ELSE
 
 var output = {
 	lastTrip: 0, 
@@ -44,7 +44,6 @@ var output = {
 	rexStatusMilesRemain: 0
 }
 
-
 function getCookieString (callback) {
 	console.log ('getting some delicious cookies...')
 	var url = 'https://connecteddrive.bmwusa.com/cdp/release/internet/servlet/login?locale=en-us'
@@ -60,11 +59,18 @@ function getCookieString (callback) {
 	}
 
 	request.get ({uri: url, headers:headers}, function (err, httpResponse, body) {
+		//if (err, console.log ('Error: ' + err) )
+		//console.log (util.inspect (httpResponse))
+		//console.log (util.inspect (body))
+		//console.log (util.inspect (cookies.getCookies('https://connecteddrive.bmwusa.com/')))
+		//console.log (util.inspect (httpResponse.headers['set-cookie']))
+
 		cookieString = httpResponse.headers['set-cookie']
 		callback (null, cookieString)
 	})
 }
 
+// Login to ConnectedDrive
 function doLogin (callback) {
 	getCookieString (function (error, cookieString) { 
 		console.log ('attempting to login...')
@@ -99,7 +105,7 @@ function doLogin (callback) {
 	})
 }
 
-
+// Get Statistics Page, return Cheerio object
 function getStatistics (callback) {
 	doLogin (function (error, status) {
 		console.log ('retrieving statistics')
@@ -117,6 +123,7 @@ function getStatistics (callback) {
 	})
 }
 
+// Post data to emoncms, 
 function postToEmonCMS (passValues, callback) {
 	console.log ('posting to emoncms!')
 	var stringValues = JSON.stringify (passValues)
@@ -124,24 +131,28 @@ function postToEmonCMS (passValues, callback) {
 
 	var postemoncms = {
 		method: 'POST',
-		uri: loginObject.emonCmsURL + '/input/post?node=BMWi3REx&data='+stringValues+'&apikey='+loginObject.emonCmsAPIKey
+		uri: loginObject.emonCmsURL + '/input/post?node='+loginObject.emonCmsNode+'&data='+stringValues+'&apikey='+loginObject.emonCmsAPIKey
 	}
 	request (postemoncms, function (error, response, body) {
 		if (error) {console.log ('Error' + error); self.close(process.exit (-1))}
 		
 		console.log (util.inspect(body))
+		//process.exit (0)
 		callback (null, body)
-	})
+	})	    
 }
 
 
+// Excuse my scope.
+var lastMileage
+var lastTrip
+var lastUpdated
 
-
+// Process the statistics.  Some logic in here to clean up the object and not post based on features above.
 function processStatistics (callback) {
-	var lastMileage
-	var lastTrip
 	db.get ('lastMileage', function (error, value) {if (error) {callback(error,null)} else {lastMileage = value}})
 	db.get ('lastTrip', function (error, value) {if (error) {callback(error,null)} else {lastTrip = value}})
+	db.get ('lastUpdated', function (error, value) {if (error) {callback(error,null)} else {lastUpdated = value}})
 	getStatistics (function (error, $) {
 		if (error) {console.log (error); process.exit(-1)}
 		console.log ('parsing data from nasty ass html...')
@@ -222,7 +233,7 @@ function processStatistics (callback) {
 	})
 }
 
-// Process statistics (run program)
+// Run this program
 processStatistics (function (error, body) {
 	if (error) {console.log (error); process.exit(-1)}
 	else {console.log (body), process.exit()}
@@ -233,17 +244,14 @@ function getCurrentLastUpdated ($) {
 	return $('div #teaserVehicleStatus p:nth-child(2)').text().substring(0, $('div #teaserVehicleStatus p:nth-child(2)').text().indexOf('\n'))
 }
 
-// Should an update be performed based on the the last updated date and the current updated date
+// Should an update be performed
 function performUpdate ($) {
 	var currentLastUpdated = getCurrentLastUpdated($)
-	db.get ('lastUpdated', function (error, lastUpdated) {
-		console.log ('last: ' + lastUpdated + ' | now: ' + currentLastUpdated)
-		if (lastUpdated == currentLastUpdated) {
-			return false
-		} else {
-			return true
-		}
-	})
+	if (lastUpdated == currentLastUpdated) {
+		return false
+	} else {
+		return true
+	}
 }
 
 // Get last trip mileage
@@ -402,6 +410,7 @@ function batteryChargeStatusMilesRemain ($) {
 	return i3Ranges.substring(i3RangesPercentLocation+1, i3RangesMls1Location-1)
 }
 
+// get the rex status percentage, this isn't perfect, but it's close enough.
 function rexStatusPercentage ($) {
 	// This isn't a perect match.  There appears to be a 3% error >50% and a <2% error <50%
 	return  $('div:nth-child(5) .charge-bar').attr('data-charge')
@@ -415,4 +424,5 @@ function rexStatusMilesRemain ($) {
 	var i3RangesPercentLocation = i3Ranges.indexOf('%')
 	var i3RangesMls1Location = i3Ranges.indexOf('mls')
 	return i3Ranges.substring(i3RangesMls1Location+3, i3RangesLength-4)
+
 }
